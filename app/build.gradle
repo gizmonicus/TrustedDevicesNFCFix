@@ -18,7 +18,10 @@ android {
         }
     }
     sourceSets {
-        main.java.srcDirs += 'app/src/main/java/us/gizmonic/trusteddevicesnfcfix/'
+        main {
+            java.srcDirs += 'app/src/main/java/us/gizmonic/trusteddevicesnfcfix/'
+            resources.includes = ['assets/xposed_init']
+        }
     }
 }
 
