@@ -1,17 +1,12 @@
 package us.gizmonic.trusteddevicesnfcfix;
 
 import android.app.Application;
-import android.hardware.display.DisplayManager;
-
 import java.lang.reflect.Constructor;
-
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
-
 import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
 import static de.robv.android.xposed.XposedHelpers.findClass;
 
@@ -25,7 +20,12 @@ public class NfcFix implements IXposedHookLoadPackage {
     private static Object nfcServiceObject;
     private static boolean debug = true;
     public static final String PACKAGE_NFC = "com.android.nfc";
+    static final int SCREEN_STATE_UNKNOWN = 0;
+    static final int SCREEN_STATE_OFF = 1;
+    static final int SCREEN_STATE_ON_LOCKED = 2;
+    static final int SCREEN_STATE_ON_UNLOCKED = 3;
 
+    // TODO: Make this configurable on the fly
     public void debugMsg(String message) {
       if (debug) {
         XposedBridge.log("NfcFix--> " + message);
@@ -41,11 +41,20 @@ public class NfcFix implements IXposedHookLoadPackage {
             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                 final int currScreenState;
                 currScreenState = (Integer) XposedHelpers.callMethod(mScreenStateHelper, "checkScreenState");
-                debugMsg("currScreenState=" + (Integer) currScreenState);
-            }
+                debugMsg("applyRoutingHook: currScreenState=" + (Integer) currScreenState);
 
-            @Override
-            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                if ((currScreenState != SCREEN_STATE_ON_LOCKED)) {
+                  debugMsg("applyRoutingHook: nothing to do, returning");
+                  XposedHelpers.setAdditionalInstanceField(param.thisObject, "mOrigScreenState", -1);
+                  return;
+                }
+
+                debugMsg("applyRoutingHook: setting NeedScreenOnState");
+                XposedHelpers.setAdditionalInstanceField(param.thisObject, "NeedScreenOnState", true);
+                synchronized (param.thisObject) { // Not sure if this is correct, but NfcService.java insists on having accesses to the mScreenState variable synchronized, so I'm doing the same here
+                  XposedHelpers.setAdditionalInstanceField(param.thisObject, "mOrigScreenState", XposedHelpers.getIntField(param.thisObject, "mScreenState"));
+                  XposedHelpers.setIntField(param.thisObject, "mScreenState", SCREEN_STATE_ON_UNLOCKED);
+                }
             }
         };
 
@@ -55,13 +64,17 @@ public class NfcFix implements IXposedHookLoadPackage {
         XC_MethodHook screenStateHelperHook = new XC_MethodHook () {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                // don't need to do anything before the method
-            }
+                try {
+                  debugMsg("screenStateHelperHook: Attempting to set NeedScreenOnState");
+                  Boolean NeedScreenOnState = (Boolean)XposedHelpers.getAdditionalInstanceField(param.thisObject, "NeedScreenOnState") ;
+                  if (NeedScreenOnState == null || NeedScreenOnState == false)
+                    return;
 
-            @Override
-            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                XposedBridge.log("Tricking computeDiscoveryParameters to think screen is ON_UNLOCKED");
-                param.setResult(3);
+                  param.setResult(SCREEN_STATE_ON_UNLOCKED);
+                } catch (Exception e) {
+                  debugMsg("screenStateHelperHook: beforeHookedMethod threw exception: " + e.getMessage().toString());
+                  e.printStackTrace();
+                }
             }
         };
 
@@ -71,24 +84,15 @@ public class NfcFix implements IXposedHookLoadPackage {
         XC_MethodHook initNfcServiceHook = new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                debugMsg("In initNfcServiceHook");
                 nfcServiceObject = param.thisObject;
 
                 try {
-                  debugMsg("Trying to set mScreenStateHelper");
+                  debugMsg("initNfcServiceHook: Trying to set mScreenStateHelper");
                   mScreenStateHelper = XposedHelpers.getObjectField(param.thisObject, "mScreenStateHelper");
                 } catch (NoSuchFieldError e) {
-                  debugMsg("Field mScreenStateHelper not found: " + e.getMessage().toString());
+                  debugMsg("initNfcServiceHook: Field mScreenStateHelper not found: " + e.getMessage().toString());
                   e.printStackTrace();
                 }
-            }
-        };
-
-        XC_MethodHook nfcLockScreenYes = new XC_MethodHook() {
-            @Override
-            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                debugMsg("In nfcLockScreenYes");
-                param.setResult(true);
             }
         };
 
@@ -102,19 +106,20 @@ public class NfcFix implements IXposedHookLoadPackage {
         }
 
         // Great, we're in the right place, now let's hook some methods.
-        debugMsg("Loaded app: " + lpparam.packageName);
+        debugMsg("Main: Loaded app: " + lpparam.packageName);
 
         /*
-         * Grab reference to NfcService class
+         * Grab reference to NfcService class or constructor. I think most of this code
+         * is superfluous, but I'm leaving it in because, well, it fucking works.
          */
         Class<?> NfcService = null;
 
         if (NfcService == null) {
             try {
-                debugMsg("Looking up reference to NfcService class");
+                debugMsg("Main: Looking up reference to NfcService class");
                 NfcService = findClass(PACKAGE_NFC + ".NfcService", lpparam.classLoader);
             } catch (XposedHelpers.ClassNotFoundError e) {
-                debugMsg("Class NfcService not found: " + e.getMessage().toString());
+                debugMsg("Main: Class NfcService not found: " + e.getMessage().toString());
                 e.printStackTrace();
             }
         }
@@ -122,30 +127,27 @@ public class NfcFix implements IXposedHookLoadPackage {
         // Trying to hook into constructor
         boolean hookedSuccessfully = true;
         try {
-            debugMsg("Searching for NfcServiceConstructor");
+            debugMsg("Main: Searching for NfcServiceConstructor");
             Constructor<?> NfcServiceConstructor = XposedHelpers.findConstructorBestMatch(NfcService, Application.class);
-            debugMsg("Found NfcServiceConstructor");
+            debugMsg("Main: Found NfcServiceConstructor");
             XposedBridge.hookMethod(NfcServiceConstructor, initNfcServiceHook);
         } catch (NoSuchMethodError e) {
-            debugMsg("Method NfcServiceConstructor not found: " + e.getMessage().toString());
+            debugMsg("Main: Method NfcServiceConstructor not found: " + e.getMessage().toString());
             hookedSuccessfully = false;
         }
 
         if (!hookedSuccessfully) {
             try {
-                debugMsg("Attempting to hook onCreate");
+                debugMsg("Main: Attempting to hook onCreate");
                 findAndHookMethod(NfcService, "onCreate", initNfcServiceHook);
-                debugMsg("Attempting to hook onCreate");
+                debugMsg("Main: Attempting to hook onCreate");
             } catch (NoSuchMethodError e) {
-                debugMsg("Method onCreate not found: " + e.getMessage().toString());
+                debugMsg("Main: Method onCreate not found: " + e.getMessage().toString());
                 e.printStackTrace();
             }
         }
-
         // create our method hooks
-        //findAndHookMethod(PACKAGE_NFC + ".ScreenStateHelper", lpparam.classLoader, "checkScreenState", screenStateHelperHook);
-
-        //findAndHookMethod(PACKAGE_NFC + ".NfcService", lpparam.classLoader, "applyRouting", boolean.class, applyRoutingHook);
-        findAndHookMethod(PACKAGE_NFC + ".NfcUnlockManager", lpparam.classLoader, "isLockscreenPollingEnabled", nfcLockScreenYes);
+        findAndHookMethod(PACKAGE_NFC + ".ScreenStateHelper", lpparam.classLoader, "checkScreenState", screenStateHelperHook);
+        findAndHookMethod(PACKAGE_NFC + ".NfcService", lpparam.classLoader, "applyRouting", boolean.class, applyRoutingHook);
     }
 }
