@@ -44,15 +44,17 @@ public class NfcFix implements IXposedHookLoadPackage {
                 debugMsg("applyRoutingHook: currScreenState=" + (Integer) currScreenState);
 
                 if ((currScreenState != SCREEN_STATE_ON_LOCKED)) {
-                  debugMsg("applyRoutingHook: nothing to do, returning");
+                  debugMsg("applyRoutingHook: setting mOrigScreenState to -1");
                   XposedHelpers.setAdditionalInstanceField(param.thisObject, "mOrigScreenState", -1);
                   return;
                 }
 
-                debugMsg("applyRoutingHook: setting NeedScreenOnState");
+                debugMsg("applyRoutingHook: setting NeedScreenOnState to True");
                 XposedHelpers.setAdditionalInstanceField(param.thisObject, "NeedScreenOnState", true);
                 synchronized (param.thisObject) { // Not sure if this is correct, but NfcService.java insists on having accesses to the mScreenState variable synchronized, so I'm doing the same here
-                  XposedHelpers.setAdditionalInstanceField(param.thisObject, "mOrigScreenState", XposedHelpers.getIntField(param.thisObject, "mScreenState"));
+                  int mScreenState =  XposedHelpers.getIntField(param.thisObject, "mScreenState");
+                  debugMsg("applyRoutingHook: setting mOrigScreenState to mScreenState; value is " + Integer.toString(mScreenState));
+                  XposedHelpers.setAdditionalInstanceField(param.thisObject, "mOrigScreenState",mScreenState);
                   XposedHelpers.setIntField(param.thisObject, "mScreenState", SCREEN_STATE_ON_UNLOCKED);
                 }
             }
@@ -65,11 +67,17 @@ public class NfcFix implements IXposedHookLoadPackage {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                 try {
-                  debugMsg("screenStateHelperHook: Attempting to set NeedScreenOnState");
                   Boolean NeedScreenOnState = (Boolean)XposedHelpers.getAdditionalInstanceField(param.thisObject, "NeedScreenOnState") ;
-                  if (NeedScreenOnState == null || NeedScreenOnState == false)
+                  if (NeedScreenOnState == null) {
+                    debugMsg("screenStateHelperHook: NeedScreenOnState is NULL. Doing nothing.");
                     return;
+                  } else if (NeedScreenOnState == false) {
+                    debugMsg("screenStateHelperHook: NeedScreenOnState is False. Doing nothing.");
+                    return;
+                  }
 
+
+                  debugMsg("screenStateHelperHook: NeedScreenOnState is True. Setting screen state to ON_UNLOCKED");
                   param.setResult(SCREEN_STATE_ON_UNLOCKED);
                 } catch (Exception e) {
                   debugMsg("screenStateHelperHook: beforeHookedMethod threw exception: " + e.getMessage().toString());
@@ -87,7 +95,7 @@ public class NfcFix implements IXposedHookLoadPackage {
                 nfcServiceObject = param.thisObject;
 
                 try {
-                  debugMsg("initNfcServiceHook: Trying to set mScreenStateHelper");
+                  debugMsg("initNfcServiceHook: Trying to get mScreenStateHelper");
                   mScreenStateHelper = XposedHelpers.getObjectField(param.thisObject, "mScreenStateHelper");
                 } catch (NoSuchFieldError e) {
                   debugMsg("initNfcServiceHook: Field mScreenStateHelper not found: " + e.getMessage().toString());
